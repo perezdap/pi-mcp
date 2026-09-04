@@ -1,0 +1,18 @@
+{
+  "mcpServers": {
+    "filesystem": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."]
+    },
+    "myapi": {
+      "url": "https://mcp.example.com/mcp",
+      "token": "$MYAPI_TOKEN"
+    },
+    "remote-oauth": {
+      "url": "https://mcp.example.com/mcp",
+      "oauth": true,
+      "disabled": true
+    }
+  },
+  "defaultTimeout": 60000
+}

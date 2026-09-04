@@ -1,0 +1,52 @@
+{
+  "name": "pi-mcp",
+  "version": "0.1.0",
+  "description": "Pi extension that exposes tools from configured MCP servers (stdio or HTTP) as native pi tools, with API key and OAuth support.",
+  "type": "module",
+  "main": "index.ts",
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "test": "node test/smoke.test.mjs"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "keywords": [
+    "pi",
+    "pi-package",
+    "pi-extension",
+    "mcp",
+    "model-context-protocol",
+    "tools"
+  ],
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0"
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-tui": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "^0.85.0",
+    "@earendil-works/pi-coding-agent": "^0.85.0",
+    "@earendil-works/pi-tui": "^0.85.0",
+    "@types/node": "^22.0.0",
+    "jiti": "^2.7.0",
+    "typebox": "^1.0.0",
+    "typescript": "^5.9.3",
+    "zod": "^4.5.4"
+  },
+  "files": [
+    "index.ts",
+    "src",
+    "README.md"
+  ]
+}
