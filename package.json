@@ -48,5 +48,10 @@
     "index.ts",
     "src",
     "README.md"
-  ]
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/perezdap/pi-mcp.git"
+  },
+  "homepage": "https://github.com/perezdap/pi-mcp"
 }

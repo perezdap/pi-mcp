@@ -16,7 +16,7 @@ A [pi](https://pi.dev) extension that connects to [MCP](https://modelcontextprot
 pi install /path/to/pi-mcp
 
 # or from git
-pi install git:github.com/<you>/pi-mcp
+pi install git:github.com/perezdap/pi-mcp
 ```
 
 For development: `pi -e ./index.ts`.
