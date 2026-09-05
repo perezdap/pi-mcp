@@ -18,8 +18,6 @@ export type ConnectionEvents = {
 	onLog?: (conn: McpConnection, message: string) => void;
 };
 
-const DEFAULT_CALLBACK_PORT = 19876;
-
 export class McpConnection {
 	readonly name: string;
 	readonly config: ServerConfig;
@@ -64,9 +62,9 @@ export class McpConnection {
 
 	private oauthConfig(): OAuthConfig {
 		const cfg = (this.config as HttpServerConfig).oauth;
-		const base: OAuthConfig = typeof cfg === "object" ? { ...cfg } : {};
-		if (base.callbackPort === undefined) base.callbackPort = DEFAULT_CALLBACK_PORT;
-		return base;
+		// callbackPort is left undefined when not configured so PiOAuthProvider can fall back
+		// to an ephemeral port if the default one is busy (e.g. another pi instance).
+		return typeof cfg === "object" ? { ...cfg } : {};
 	}
 
 	private buildHttpHeaders(cfg: HttpServerConfig): Record<string, string> {

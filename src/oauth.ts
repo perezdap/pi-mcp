@@ -46,6 +46,9 @@ export function hasStoredTokens(key: string): boolean {
 
 export type AuthorizationPrompt = (info: { url: string }) => void;
 
+/** Preferred loopback port for the OAuth redirect when none is configured. */
+export const DEFAULT_CALLBACK_PORT = 19876;
+
 /**
  * OAuthClientProvider that persists credentials to ~/.pi/agent/mcp-auth.json and
  * completes the authorization-code flow via a loopback HTTP listener.
@@ -55,6 +58,8 @@ export class PiOAuthProvider implements OAuthClientProvider {
 	private readonly cfg: OAuthConfig;
 	private server?: Server;
 	private port: number;
+	/** True when the user pinned callbackPort in config (redirect URI may be pre-registered). */
+	private readonly portIsExplicit: boolean;
 	private pendingCode?: Promise<string>;
 	private resolveCode?: (code: string) => void;
 	private rejectCode?: (err: Error) => void;
@@ -63,7 +68,8 @@ export class PiOAuthProvider implements OAuthClientProvider {
 	constructor(key: string, cfg: OAuthConfig) {
 		this.key = key;
 		this.cfg = cfg;
-		this.port = cfg.callbackPort ?? 0;
+		this.portIsExplicit = cfg.callbackPort !== undefined;
+		this.port = cfg.callbackPort ?? DEFAULT_CALLBACK_PORT;
 	}
 
 	private get callbackPath(): string {
@@ -163,8 +169,7 @@ export class PiOAuthProvider implements OAuthClientProvider {
 		// Avoid unhandled rejection noise if nobody awaits it
 		this.pendingCode.catch(() => {});
 
-		await new Promise<void>((resolve, reject) => {
-			const server = createServer((req, res) => {
+		const server = createServer((req, res) => {
 				const url = new URL(req.url ?? "/", `http://127.0.0.1:${this.port}`);
 				if (url.pathname !== this.callbackPath) {
 					res.statusCode = 404;
@@ -186,16 +191,26 @@ export class PiOAuthProvider implements OAuthClientProvider {
 				res.end(
 					`<html><body style="font-family:sans-serif"><h2>Authorized</h2><p>You can close this window and return to pi.</p></body></html>`,
 				);
-				this.resolveCode?.(code);
-			});
-			server.on("error", reject);
-			server.listen(this.port, "127.0.0.1", () => {
-				const addr = server.address();
-				if (addr && typeof addr === "object") this.port = addr.port;
-				this.server = server;
-				resolve();
-			});
+			this.resolveCode?.(code);
 		});
+
+		try {
+			await listen(server, this.port);
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EADDRINUSE") throw err;
+			if (this.portIsExplicit) {
+				throw new Error(
+					`OAuth callback port ${this.port} is already in use (is another pi instance running?). ` +
+						`Close it or change "oauth.callbackPort" for this server.`,
+				);
+			}
+			// Default port taken (likely another pi instance); fall back to an ephemeral port.
+			await listen(server, 0);
+		}
+		const addr = server.address();
+		if (addr && typeof addr === "object") this.port = addr.port;
+		this.server = server;
 	}
 
 	redirectToAuthorization(authorizationUrl: URL): void {
@@ -225,6 +240,20 @@ export class PiOAuthProvider implements OAuthClientProvider {
 		this.server = undefined;
 		this.pendingCode = undefined;
 	}
+}
+
+function listen(server: Server, port: number): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		const onError = (err: Error) => {
+			server.off("error", onError);
+			reject(err);
+		};
+		server.once("error", onError);
+		server.listen(port, "127.0.0.1", () => {
+			server.off("error", onError);
+			resolve();
+		});
+	});
 }
 
 function escapeHtml(s: string): string {
