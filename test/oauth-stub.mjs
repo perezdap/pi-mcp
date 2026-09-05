@@ -1,5 +1,16 @@
 // In-memory OAuth boundary: never opens a browser or accesses user credentials.
 // Provides the auth() implementation injected into the real authorizeWith() routine.
+import { fileURLToPath } from 'node:url';
+import { createJiti } from 'jiti';
+
+// The stub provider delegates to the production authorizeWith() choreography from
+// src/oauth.ts (via its own jiti instance with the pi alias), so the tests exercise
+// the real routine instead of a hand-synced copy.
+const jiti = createJiti(import.meta.url, { alias: {
+  '@earendil-works/pi-coding-agent': fileURLToPath(new URL('./pi-stub.mjs', import.meta.url)),
+} });
+const { authorizeWith } = await jiti.import(new URL('../src/oauth.ts', import.meta.url).href);
+
 export const state = { tokens: undefined, redirects: 0, exchanges: 0, listeners: 0, fail: false, gate: undefined };
 export function clearStoredAuth() { state.tokens = undefined; }
 export class UnauthorizedError extends Error {}
@@ -24,19 +35,4 @@ export async function auth(provider, options) {
   state.exchanges++;
   state.tokens = { access_token: 'test-access-token', token_type: 'Bearer' };
   return 'AUTHORIZED';
-}
-// Same choreography as the production authorizeWith(), minus the loopback listener
-// (the stub provider delivers the code without one).
-export async function authorizeWith(provider, serverUrl, authFn) {
-  await provider.startCallbackServer();
-  try {
-    const result = await authFn(provider, { serverUrl });
-    if (result === 'REDIRECT') {
-      const authorizationCode = await provider.waitForAuthorizationCode();
-      const completed = await authFn(provider, { serverUrl, authorizationCode });
-      if (completed !== 'AUTHORIZED') throw new Error('OAuth authorization did not complete');
-    }
-  } finally {
-    provider.stopCallbackServer();
-  }
 }

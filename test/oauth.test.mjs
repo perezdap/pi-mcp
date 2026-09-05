@@ -14,11 +14,14 @@ const { McpConnection } = await jiti.import(new URL('../src/client.ts', import.m
 // Real provider + real production routine, driven by the in-memory boundary.
 const { authorizeWith: realAuthorizeWith, PiOAuthProvider: RealProvider } = await jiti.import(new URL('../src/oauth.ts', import.meta.url).href);
 const headers = [];
+// Gate for the local test HTTP server: while set (to a promise), requests wait on it.
+const serverGate = { promise: undefined };
 const server = createServer(async (req, res) => {
   if (req.method !== 'POST') { res.writeHead(405).end(); return; }
   let body = '';
   for await (const chunk of req) body += chunk;
   const message = JSON.parse(body);
+  if (serverGate.promise) await serverGate.promise;
   headers.push(req.headers.authorization);
   if (message.id === undefined) { res.writeHead(202).end(); return; }
   const result = message.method === 'initialize'
@@ -47,13 +50,25 @@ try {
   let release;
   state.gate = new Promise(resolve => { release = resolve; });
   const pendingLogin = conn.login();
-  await assert.rejects(conn.login(), /Connection in progress/);
+  const queuedLogin = conn.login(); // serializes behind the in-flight login instead of rejecting
   const pendingConnect = conn.connect();
   assert.equal(pendingConnect, pendingLogin, 'connect shares an in-flight login');
   release();
   await pendingLogin;
+  await queuedLogin;
   state.gate = undefined;
-  assert.equal(state.redirects, 3, 'concurrent calls do not start another flow');
+  assert.equal(state.redirects, 4, 'concurrent calls run one flow; the queued login runs after it');
+  // login() while a plain connect() is in flight queues behind it rather than rejecting.
+  let releaseConnect;
+  serverGate.promise = new Promise(resolve => { releaseConnect = resolve; });
+  const plainConnect = conn.connect();
+  const queuedBehindConnect = conn.login();
+  releaseConnect();
+  await plainConnect;
+  serverGate.promise = undefined;
+  await queuedBehindConnect;
+  assert.equal(state.redirects, 5, 'login queued behind a plain connect runs once it settles');
+  assert.equal(conn.status, 'connected');
   state.fail = true;
   await assert.rejects(conn.login(), /Authorization denied/);
   assert.equal(conn.status, 'error');

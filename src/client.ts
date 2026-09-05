@@ -124,7 +124,7 @@ export class McpConnection {
 	 */
 	connect(interactiveAuth = false): Promise<void> {
 		if (this.connecting) return this.connecting;
-		this.connecting = this.doConnect(interactiveAuth).finally(() => {
+		this.connecting = this.doConnect({ interactiveAuth }).finally(() => {
 			this.connecting = undefined;
 		});
 		return this.connecting;
@@ -132,18 +132,26 @@ export class McpConnection {
 
 	/**
 	 * Explicit login must authorize even when the server accepts anonymous requests.
-	 * Rejects while a connection attempt is in flight; connect() would share it instead.
+	 * Serializes with connection attempts: shares one already in flight (connect()
+	 * does the same), and queues behind it to run once it settles.
 	 */
 	login(): Promise<void> {
 		if (!this.usesOAuth) return Promise.reject(new Error("OAuth is not configured"));
-		if (this.connecting) return Promise.reject(new Error("Connection in progress; retry login"));
-		this.connecting = this.doConnect(true, true).finally(() => {
+		if (this.connecting) {
+			// Queue behind the in-flight attempt (login or connect), then retry.
+			return this.connecting.then(
+				() => this.login(),
+				() => this.login(),
+			);
+		}
+		this.connecting = this.doConnect({ interactiveAuth: true, forceLogin: true }).finally(() => {
 			this.connecting = undefined;
 		});
 		return this.connecting;
 	}
 
-	private async doConnect(interactiveAuth: boolean, forceLogin = false): Promise<void> {
+	private async doConnect(opts: { interactiveAuth?: boolean; forceLogin?: boolean } = {}): Promise<void> {
+		const { interactiveAuth = false, forceLogin = false } = opts;
 		await this.close();
 		this.setStatus("connecting");
 		const connectTimeout = this.config.connectTimeout ?? 30_000;
