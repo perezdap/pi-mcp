@@ -170,27 +170,27 @@ export class PiOAuthProvider implements OAuthClientProvider {
 		this.pendingCode.catch(() => {});
 
 		const server = createServer((req, res) => {
-				const url = new URL(req.url ?? "/", `http://127.0.0.1:${this.port}`);
-				if (url.pathname !== this.callbackPath) {
-					res.statusCode = 404;
-					res.end("Not found");
-					return;
-				}
-				const error = url.searchParams.get("error");
-				const code = url.searchParams.get("code");
-				res.setHeader("Content-Type", "text/html; charset=utf-8");
-				if (error || !code) {
-					res.statusCode = 400;
-					res.end(
-						`<html><body style="font-family:sans-serif"><h2>Authorization failed</h2><p>${escapeHtml(error ?? "missing code")}: ${escapeHtml(url.searchParams.get("error_description") ?? "")}</p></body></html>`,
-					);
-					this.rejectCode?.(new Error(`OAuth authorization failed: ${error ?? "missing code"}`));
-					return;
-				}
-				res.statusCode = 200;
+			const url = new URL(req.url ?? "/", `http://127.0.0.1:${this.port}`);
+			if (url.pathname !== this.callbackPath) {
+				res.statusCode = 404;
+				res.end("Not found");
+				return;
+			}
+			const error = url.searchParams.get("error");
+			const code = url.searchParams.get("code");
+			res.setHeader("Content-Type", "text/html; charset=utf-8");
+			if (error || !code) {
+				res.statusCode = 400;
 				res.end(
-					`<html><body style="font-family:sans-serif"><h2>Authorized</h2><p>You can close this window and return to pi.</p></body></html>`,
+					`<html><body style="font-family:sans-serif"><h2>Authorization failed</h2><p>${escapeHtml(error ?? "missing code")}: ${escapeHtml(url.searchParams.get("error_description") ?? "")}</p></body></html>`,
 				);
+				this.rejectCode?.(new Error(`OAuth authorization failed: ${error ?? "missing code"}`));
+				return;
+			}
+			res.statusCode = 200;
+			res.end(
+				`<html><body style="font-family:sans-serif"><h2>Authorized</h2><p>You can close this window and return to pi.</p></body></html>`,
+			);
 			this.resolveCode?.(code);
 		});
 
@@ -214,22 +214,11 @@ export class PiOAuthProvider implements OAuthClientProvider {
 	}
 
 	/**
-	 * Run the full interactive authorization flow for a server URL: start the loopback
-	 * listener, drive redirect → code → token exchange via the SDK, and always release
-	 * the listener when done, success or failure.
+	 * Run the full interactive authorization flow for a server URL. Always releases
+	 * the loopback listener when done, success or failure.
 	 */
 	async authorize(serverUrl: URL): Promise<void> {
-		await this.startCallbackServer();
-		try {
-			const result = await auth(this, { serverUrl });
-			if (result === "REDIRECT") {
-				const authorizationCode = await this.waitForAuthorizationCode();
-				const completed = await auth(this, { serverUrl, authorizationCode });
-				if (completed !== "AUTHORIZED") throw new Error("OAuth authorization did not complete");
-			}
-		} finally {
-			this.stopCallbackServer();
-		}
+		return authorizeWith(this, serverUrl);
 	}
 
 	redirectToAuthorization(authorizationUrl: URL): void {
@@ -274,6 +263,30 @@ export function listen(server: Server, port: number): Promise<void> {
 			resolve();
 		});
 	});
+}
+
+/**
+ * Shared interactive authorization choreography: start the loopback listener, drive
+ * redirect → code → token exchange via the given auth() implementation, always release
+ * the listener. `authFn` is injectable so tests can exercise this routine against an
+ * in-memory OAuth boundary (no browser, no user credentials) instead of a hand-synced copy.
+ */
+export async function authorizeWith(
+	provider: PiOAuthProvider,
+	serverUrl: URL,
+	authFn: typeof auth = auth,
+): Promise<void> {
+	await provider.startCallbackServer();
+	try {
+		const result = await authFn(provider, { serverUrl });
+		if (result === "REDIRECT") {
+			const authorizationCode = await provider.waitForAuthorizationCode();
+			const completed = await authFn(provider, { serverUrl, authorizationCode });
+			if (completed !== "AUTHORIZED") throw new Error("OAuth authorization did not complete");
+		}
+	} finally {
+		provider.stopCallbackServer();
+	}
 }
 
 function escapeHtml(s: string): string {

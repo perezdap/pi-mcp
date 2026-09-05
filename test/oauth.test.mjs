@@ -9,8 +9,10 @@ const jiti = createJiti(import.meta.url, { alias: {
   './oauth.ts': stub,
   '@modelcontextprotocol/sdk/client/auth.js': stub,
 } });
-const { state } = await jiti.import(stub);
+const { state, auth: stubAuth } = await jiti.import(stub);
 const { McpConnection } = await jiti.import(new URL('../src/client.ts', import.meta.url).href);
+// Real provider + real production routine, driven by the in-memory boundary.
+const { authorizeWith: realAuthorizeWith, PiOAuthProvider: RealProvider } = await jiti.import(new URL('../src/oauth.ts', import.meta.url).href);
 const headers = [];
 const server = createServer(async (req, res) => {
   if (req.method !== 'POST') { res.writeHead(405).end(); return; }
@@ -57,8 +59,31 @@ try {
   assert.equal(conn.status, 'error');
   assert.equal(conn.connected, false);
   assert.equal(state.listeners, 0, 'callback listener closes after failure');
+  state.fail = false;
   const noOAuth = new McpConnection('no-oauth', { url: conn.config.url });
   await assert.rejects(noOAuth.login(), /OAuth is not configured/);
+
+  // The production authorizeWith() routine against the real provider: the loopback
+  // listener starts for real and the authorization code is delivered over HTTP to it.
+  const provider = new RealProvider('test|direct', {});
+  provider.onAuthorizationUrl = () => {
+    // The browser would land on the callback; hit it directly instead.
+    fetch(`${provider.redirectUrl}?code=test-code`).then((r) => r.text()).catch(() => {});
+  };
+  const before = { redirects: state.redirects, exchanges: state.exchanges };
+  await realAuthorizeWith(provider, new URL('http://127.0.0.1/mcp'), stubAuth);
+  assert.equal(state.redirects, before.redirects + 1, 'authorizeWith drives redirect through the real provider');
+  assert.equal(state.exchanges, before.exchanges + 1);
+  assert.match(provider.redirectUrl, /^http:\/\/127\.0\.0\.1:\d+\/callback$/, 'loopback listener started on a real port');
+  assert.equal(state.listeners, 0, 'real listener released after success');
+  // Error-path callback: the listener rejects the pending code, authorizeWith still releases it.
+  const failed = new RealProvider('test|failed', {});
+  failed.onAuthorizationUrl = () => {
+    fetch(`${failed.redirectUrl}?error=access_denied`).then((r) => r.text()).catch(() => {});
+  };
+  await assert.rejects(realAuthorizeWith(failed, new URL('http://127.0.0.1/mcp'), stubAuth), /OAuth authorization failed: access_denied/);
+  assert.equal(state.listeners, 0, 'real listener released after failure');
+
   console.log('OAuth regression tests passed');
 } finally {
   await conn.close();
