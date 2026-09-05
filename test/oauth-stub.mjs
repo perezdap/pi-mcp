@@ -22,7 +22,7 @@ export class PiOAuthProvider {
   async startCallbackServer() { if (!this.started) { this.started = true; state.listeners++; } }
   stopCallbackServer() { if (this.started) { this.started = false; state.listeners--; } }
   async waitForAuthorizationCode() { return 'test-code'; }
-  async authorize(serverUrl) { return authorizeWith(this, serverUrl, auth); }
+  async authorize(serverUrl, options) { return authorizeWith(this, serverUrl, auth, options); }
 }
 export async function auth(provider, options) {
   if (state.gate) await state.gate;

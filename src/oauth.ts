@@ -45,6 +45,7 @@ export function hasStoredTokens(key: string): boolean {
 }
 
 export type AuthorizationPrompt = (info: { url: string }) => void;
+type AuthorizationOptions = { authorizationStarted?: boolean };
 
 /** Preferred loopback port for the OAuth redirect when none is configured. */
 export const DEFAULT_CALLBACK_PORT = 19876;
@@ -215,10 +216,11 @@ export class PiOAuthProvider implements OAuthClientProvider {
 
 	/**
 	 * Run the full interactive authorization flow for a server URL. Always releases
-	 * the loopback listener when done, success or failure.
+	 * the loopback listener when done, success or failure. Resume an existing redirect
+	 * when the transport has already started authorization in response to a 401.
 	 */
-	async authorize(serverUrl: URL): Promise<void> {
-		return authorizeWith(this, serverUrl);
+	async authorize(serverUrl: URL, options: AuthorizationOptions = {}): Promise<void> {
+		return authorizeWith(this, serverUrl, auth, options);
 	}
 
 	redirectToAuthorization(authorizationUrl: URL): void {
@@ -275,10 +277,12 @@ export async function authorizeWith(
 	provider: PiOAuthProvider,
 	serverUrl: URL,
 	authFn: typeof auth = auth,
+	{ authorizationStarted = false }: AuthorizationOptions = {},
 ): Promise<void> {
 	await provider.startCallbackServer();
 	try {
-		const result = await authFn(provider, { serverUrl });
+		// A second auth() call would overwrite the PKCE verifier for the pending code.
+		const result = authorizationStarted ? "REDIRECT" : await authFn(provider, { serverUrl });
 		if (result === "REDIRECT") {
 			const authorizationCode = await provider.waitForAuthorizationCode();
 			const completed = await authFn(provider, { serverUrl, authorizationCode });

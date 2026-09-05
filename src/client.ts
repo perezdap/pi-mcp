@@ -173,7 +173,8 @@ export class McpConnection {
 					return;
 				}
 				try {
-					await this.oauthProvider.authorize(this.serverUrl());
+					// The transport already opened authorization before throwing UnauthorizedError.
+					await this.oauthProvider.authorize(this.serverUrl(), { authorizationStarted: true });
 					await withTimeout(this.attemptConnect(), connectTimeout, `Connecting to MCP server "${this.name}"`);
 				} catch (authErr) {
 					await this.teardown();
