@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { dirname } from "node:path";
-import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
+import { auth, type OAuthClientProvider, type OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { OAuthConfig } from "./config.ts";
 import { tokenStorePath } from "./config.ts";
@@ -45,6 +45,10 @@ export function hasStoredTokens(key: string): boolean {
 }
 
 export type AuthorizationPrompt = (info: { url: string }) => void;
+type AuthorizationOptions = { authorizationStarted?: boolean };
+
+/** Preferred loopback port for the OAuth redirect when none is configured. */
+export const DEFAULT_CALLBACK_PORT = 19876;
 
 /**
  * OAuthClientProvider that persists credentials to ~/.pi/agent/mcp-auth.json and
@@ -55,6 +59,8 @@ export class PiOAuthProvider implements OAuthClientProvider {
 	private readonly cfg: OAuthConfig;
 	private server?: Server;
 	private port: number;
+	/** True when the user pinned callbackPort in config (redirect URI may be pre-registered). */
+	private readonly portIsExplicit: boolean;
 	private pendingCode?: Promise<string>;
 	private resolveCode?: (code: string) => void;
 	private rejectCode?: (err: Error) => void;
@@ -63,7 +69,8 @@ export class PiOAuthProvider implements OAuthClientProvider {
 	constructor(key: string, cfg: OAuthConfig) {
 		this.key = key;
 		this.cfg = cfg;
-		this.port = cfg.callbackPort ?? 0;
+		this.portIsExplicit = cfg.callbackPort !== undefined;
+		this.port = cfg.callbackPort ?? DEFAULT_CALLBACK_PORT;
 	}
 
 	private get callbackPath(): string {
@@ -163,39 +170,57 @@ export class PiOAuthProvider implements OAuthClientProvider {
 		// Avoid unhandled rejection noise if nobody awaits it
 		this.pendingCode.catch(() => {});
 
-		await new Promise<void>((resolve, reject) => {
-			const server = createServer((req, res) => {
-				const url = new URL(req.url ?? "/", `http://127.0.0.1:${this.port}`);
-				if (url.pathname !== this.callbackPath) {
-					res.statusCode = 404;
-					res.end("Not found");
-					return;
-				}
-				const error = url.searchParams.get("error");
-				const code = url.searchParams.get("code");
-				res.setHeader("Content-Type", "text/html; charset=utf-8");
-				if (error || !code) {
-					res.statusCode = 400;
-					res.end(
-						`<html><body style="font-family:sans-serif"><h2>Authorization failed</h2><p>${escapeHtml(error ?? "missing code")}: ${escapeHtml(url.searchParams.get("error_description") ?? "")}</p></body></html>`,
-					);
-					this.rejectCode?.(new Error(`OAuth authorization failed: ${error ?? "missing code"}`));
-					return;
-				}
-				res.statusCode = 200;
+		const server = createServer((req, res) => {
+			const url = new URL(req.url ?? "/", `http://127.0.0.1:${this.port}`);
+			if (url.pathname !== this.callbackPath) {
+				res.statusCode = 404;
+				res.end("Not found");
+				return;
+			}
+			const error = url.searchParams.get("error");
+			const code = url.searchParams.get("code");
+			res.setHeader("Content-Type", "text/html; charset=utf-8");
+			if (error || !code) {
+				res.statusCode = 400;
 				res.end(
-					`<html><body style="font-family:sans-serif"><h2>Authorized</h2><p>You can close this window and return to pi.</p></body></html>`,
+					`<html><body style="font-family:sans-serif"><h2>Authorization failed</h2><p>${escapeHtml(error ?? "missing code")}: ${escapeHtml(url.searchParams.get("error_description") ?? "")}</p></body></html>`,
 				);
-				this.resolveCode?.(code);
-			});
-			server.on("error", reject);
-			server.listen(this.port, "127.0.0.1", () => {
-				const addr = server.address();
-				if (addr && typeof addr === "object") this.port = addr.port;
-				this.server = server;
-				resolve();
-			});
+				this.rejectCode?.(new Error(`OAuth authorization failed: ${error ?? "missing code"}`));
+				return;
+			}
+			res.statusCode = 200;
+			res.end(
+				`<html><body style="font-family:sans-serif"><h2>Authorized</h2><p>You can close this window and return to pi.</p></body></html>`,
+			);
+			this.resolveCode?.(code);
 		});
+
+		try {
+			await listen(server, this.port);
+		} catch (err) {
+			const code = (err as NodeJS.ErrnoException).code;
+			if (code !== "EADDRINUSE") throw err;
+			if (this.portIsExplicit) {
+				throw new Error(
+					`OAuth callback port ${this.port} is already in use (is another pi instance running?). ` +
+						`Close it or change "oauth.callbackPort" for this server.`,
+				);
+			}
+			// Default port taken (likely another pi instance); fall back to an ephemeral port.
+			await listen(server, 0);
+		}
+		const addr = server.address();
+		if (addr && typeof addr === "object") this.port = addr.port;
+		this.server = server;
+	}
+
+	/**
+	 * Run the full interactive authorization flow for a server URL. Always releases
+	 * the loopback listener when done, success or failure. Resume an existing redirect
+	 * when the transport has already started authorization in response to a 401.
+	 */
+	async authorize(serverUrl: URL, options: AuthorizationOptions = {}): Promise<void> {
+		return authorizeWith(this, serverUrl, auth, options);
 	}
 
 	redirectToAuthorization(authorizationUrl: URL): void {
@@ -224,6 +249,47 @@ export class PiOAuthProvider implements OAuthClientProvider {
 		this.server?.close();
 		this.server = undefined;
 		this.pendingCode = undefined;
+	}
+}
+
+/** Listen on 127.0.0.1 with proper error routing; exported for tests (port fallback cases). */
+export function listen(server: Server, port: number): Promise<void> {
+	return new Promise<void>((resolve, reject) => {
+		const onError = (err: Error) => {
+			server.off("error", onError);
+			reject(err);
+		};
+		server.once("error", onError);
+		server.listen(port, "127.0.0.1", () => {
+			server.off("error", onError);
+			resolve();
+		});
+	});
+}
+
+/**
+ * Shared interactive authorization choreography: start the loopback listener, drive
+ * redirect → code → token exchange via the given auth() implementation, always release
+ * the listener. `authFn` is injectable so tests can exercise this routine against an
+ * in-memory OAuth boundary (no browser, no user credentials) instead of a hand-synced copy.
+ */
+export async function authorizeWith(
+	provider: PiOAuthProvider,
+	serverUrl: URL,
+	authFn: typeof auth = auth,
+	{ authorizationStarted = false }: AuthorizationOptions = {},
+): Promise<void> {
+	await provider.startCallbackServer();
+	try {
+		// A second auth() call would overwrite the PKCE verifier for the pending code.
+		const result = authorizationStarted ? "REDIRECT" : await authFn(provider, { serverUrl });
+		if (result === "REDIRECT") {
+			const authorizationCode = await provider.waitForAuthorizationCode();
+			const completed = await authFn(provider, { serverUrl, authorizationCode });
+			if (completed !== "AUTHORIZED") throw new Error("OAuth authorization did not complete");
+		}
+	} finally {
+		provider.stopCallbackServer();
 	}
 }
 

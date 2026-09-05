@@ -79,9 +79,11 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	async function connectServer(conn: McpConnection, interactive: boolean, quiet = false): Promise<boolean> {
+	async function connectServer(conn: McpConnection, opts: { interactive?: boolean; quiet?: boolean; forceLogin?: boolean } = {}): Promise<boolean> {
+		const { interactive = false, quiet = false, forceLogin = false } = opts;
 		try {
-			await conn.connect(interactive);
+			if (forceLogin) await conn.login();
+			else await conn.connect(interactive);
 			if (conn.status === "connected") {
 				syncTools(conn);
 				if (!quiet) notify(`MCP "${conn.name}": connected, ${conn.tools.length} tool(s)`);
@@ -120,7 +122,7 @@ export default function (pi: ExtensionAPI) {
 		updateStatus();
 
 		await Promise.allSettled(
-			entries.filter(([, cfg]) => cfg.autoConnect !== false).map(([name]) => connectServer(connections.get(name)!, false, true)),
+			entries.filter(([, cfg]) => cfg.autoConnect !== false).map(([name]) => connectServer(connections.get(name)!, { quiet: true })),
 		);
 
 		const connected = [...connections.values()].filter((c) => c.status === "connected");
@@ -223,7 +225,7 @@ export default function (pi: ExtensionAPI) {
 					const c = await pick();
 					if (!c) return;
 					ctx.ui.notify(`Connecting to "${c.name}"...`, "info");
-					await connectServer(c, true);
+					await connectServer(c, { interactive: true });
 					return;
 				}
 				case "disconnect": {
@@ -242,9 +244,8 @@ export default function (pi: ExtensionAPI) {
 						ctx.ui.notify(`"${c.name}" does not use OAuth. Set "oauth": true in its config.`, "warning");
 						return;
 					}
-					clearStoredAuth(c.oauthKey);
 					ctx.ui.notify(`Starting OAuth login for "${c.name}" — check your browser.`, "info");
-					await connectServer(c, true);
+					await connectServer(c, { forceLogin: true });
 					return;
 				}
 				case "logout": {
@@ -295,7 +296,7 @@ export default function (pi: ExtensionAPI) {
 			if (params.action === "connect") {
 				const c = params.server ? connections.get(params.server) : undefined;
 				if (!c) throw new Error(`Unknown MCP server "${params.server ?? ""}"`);
-				const ok = await connectServer(c, false);
+				const ok = await connectServer(c);
 				return {
 					content: [{ type: "text", text: ok ? `Connected "${c.name}" with ${c.tools.length} tools: ${c.tools.map((t) => piToolName(c, t.name)).join(", ")}` : `Could not connect "${c.name}": ${c.lastError ?? "unknown error"}` }],
 					details: {},

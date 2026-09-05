@@ -6,7 +6,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { type CallToolResult, ToolListChangedNotificationSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { type HttpServerConfig, isHttpServer, type OAuthConfig, type ServerConfig } from "./config.ts";
-import { PiOAuthProvider } from "./oauth.ts";
+import { clearStoredAuth, PiOAuthProvider } from "./oauth.ts";
 import { errorMessage, expandEnv, expandEnvRecord, globMatch, withTimeout } from "./util.ts";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "auth-required" | "error";
@@ -17,8 +17,6 @@ export type ConnectionEvents = {
 	onAuthorizationUrl?: (conn: McpConnection, url: string) => void;
 	onLog?: (conn: McpConnection, message: string) => void;
 };
-
-const DEFAULT_CALLBACK_PORT = 19876;
 
 export class McpConnection {
 	readonly name: string;
@@ -64,9 +62,9 @@ export class McpConnection {
 
 	private oauthConfig(): OAuthConfig {
 		const cfg = (this.config as HttpServerConfig).oauth;
-		const base: OAuthConfig = typeof cfg === "object" ? { ...cfg } : {};
-		if (base.callbackPort === undefined) base.callbackPort = DEFAULT_CALLBACK_PORT;
-		return base;
+		// callbackPort is left undefined when not configured so PiOAuthProvider can fall back
+		// to an ephemeral port if the default one is busy (e.g. another pi instance).
+		return typeof cfg === "object" ? { ...cfg } : {};
 	}
 
 	private buildHttpHeaders(cfg: HttpServerConfig): Record<string, string> {
@@ -126,23 +124,46 @@ export class McpConnection {
 	 */
 	connect(interactiveAuth = false): Promise<void> {
 		if (this.connecting) return this.connecting;
-		this.connecting = this.doConnect(interactiveAuth).finally(() => {
+		this.connecting = this.doConnect({ interactiveAuth }).finally(() => {
 			this.connecting = undefined;
 		});
 		return this.connecting;
 	}
 
-	private async doConnect(interactiveAuth: boolean): Promise<void> {
+	/**
+	 * Explicit login must authorize even when the server accepts anonymous requests.
+	 * Serializes with connection attempts: shares one already in flight (connect()
+	 * does the same), and queues behind it to run once it settles.
+	 */
+	login(): Promise<void> {
+		if (!this.usesOAuth) return Promise.reject(new Error("OAuth is not configured"));
+		if (this.connecting) {
+			// Queue behind the in-flight attempt (login or connect), then retry.
+			return this.connecting.then(
+				() => this.login(),
+				() => this.login(),
+			);
+		}
+		this.connecting = this.doConnect({ interactiveAuth: true, forceLogin: true }).finally(() => {
+			this.connecting = undefined;
+		});
+		return this.connecting;
+	}
+
+	private async doConnect(opts: { interactiveAuth?: boolean; forceLogin?: boolean } = {}): Promise<void> {
+		const { interactiveAuth = false, forceLogin = false } = opts;
 		await this.close();
 		this.setStatus("connecting");
 		const connectTimeout = this.config.connectTimeout ?? 30_000;
 
+		if (forceLogin) clearStoredAuth(this.oauthKey);
 		if (this.usesOAuth) {
 			this.oauthProvider = new PiOAuthProvider(this.oauthKey, this.oauthConfig());
 			this.oauthProvider.onAuthorizationUrl = ({ url }) => this.events.onAuthorizationUrl?.(this, url);
 		}
 
 		try {
+			if (forceLogin) await this.oauthProvider!.authorize(this.serverUrl());
 			await withTimeout(this.attemptConnect(), connectTimeout, `Connecting to MCP server "${this.name}"`);
 		} catch (err) {
 			if (err instanceof UnauthorizedError && this.oauthProvider) {
@@ -152,14 +173,13 @@ export class McpConnection {
 					return;
 				}
 				try {
-					await this.completeOAuth();
+					// The transport already opened authorization before throwing UnauthorizedError.
+					await this.oauthProvider.authorize(this.serverUrl(), { authorizationStarted: true });
 					await withTimeout(this.attemptConnect(), connectTimeout, `Connecting to MCP server "${this.name}"`);
 				} catch (authErr) {
 					await this.teardown();
 					this.setStatus("error", `OAuth failed: ${errorMessage(authErr)}`);
 					throw authErr;
-				} finally {
-					this.oauthProvider?.stopCallbackServer();
 				}
 			} else {
 				await this.teardown();
@@ -167,10 +187,16 @@ export class McpConnection {
 				this.setStatus("error", `${errorMessage(err)}${detail}`);
 				throw err;
 			}
+		} finally {
+			this.oauthProvider?.stopCallbackServer();
 		}
 
 		await this.refreshTools();
 		this.setStatus("connected");
+	}
+
+	private serverUrl(): URL {
+		return new URL(expandEnv((this.config as HttpServerConfig).url));
 	}
 
 	private async attemptConnect(): Promise<void> {
@@ -206,22 +232,6 @@ export class McpConnection {
 				this.events.onLog?.(this, `failed to refresh tools: ${errorMessage(err)}`);
 			}
 		});
-	}
-
-	private async completeOAuth(): Promise<void> {
-		const provider = this.oauthProvider;
-		if (!provider) throw new Error("No OAuth provider");
-		await provider.startCallbackServer();
-		const code = await provider.waitForAuthorizationCode();
-		const cfg = this.config as HttpServerConfig;
-		const url = new URL(expandEnv(cfg.url));
-		// finishAuth exchanges the code for tokens via the provider; the transport itself is discarded.
-		const transport =
-			cfg.type === "sse"
-				? new SSEClientTransport(url, { authProvider: provider })
-				: new StreamableHTTPClientTransport(url, { authProvider: provider });
-		await transport.finishAuth(code);
-		await transport.close().catch(() => {});
 	}
 
 	async refreshTools(): Promise<Tool[]> {
