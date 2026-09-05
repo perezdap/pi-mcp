@@ -95,6 +95,8 @@ When a server responds `401` and `oauth` is configured, the connection is marked
 /mcp login <server>
 ```
 
+Explicit `/mcp login` clears stored credentials and starts OAuth **before connecting**, even if the server accepts anonymous requests (for example, Context7). A normal connection can succeed anonymously; **connected** alone does not mean authenticated. Use `/mcp status` to check the stored-token indicator (`oauth✓` / `oauth✗`).
+
 pi starts a loopback listener on `127.0.0.1:<callbackPort>` (default 19876), opens the authorization URL in your browser (also shown as a notification), exchanges the code with PKCE, stores the tokens, and connects. Tokens are refreshed automatically by the MCP SDK. `/mcp logout <server>` wipes stored credentials.
 
 If you pre-register a client with your provider, use redirect URI `http://127.0.0.1:19876/callback` (or whatever `callbackPort`/`callbackPath` you configure).

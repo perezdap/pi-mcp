@@ -79,9 +79,10 @@ export default function (pi: ExtensionAPI) {
 		});
 	}
 
-	async function connectServer(conn: McpConnection, interactive: boolean, quiet = false): Promise<boolean> {
+	async function connectServer(conn: McpConnection, interactive: boolean, quiet = false, forceLogin = false): Promise<boolean> {
 		try {
-			await conn.connect(interactive);
+			if (forceLogin) await conn.login();
+			else await conn.connect(interactive);
 			if (conn.status === "connected") {
 				syncTools(conn);
 				if (!quiet) notify(`MCP "${conn.name}": connected, ${conn.tools.length} tool(s)`);
@@ -242,9 +243,8 @@ export default function (pi: ExtensionAPI) {
 						ctx.ui.notify(`"${c.name}" does not use OAuth. Set "oauth": true in its config.`, "warning");
 						return;
 					}
-					clearStoredAuth(c.oauthKey);
 					ctx.ui.notify(`Starting OAuth login for "${c.name}" — check your browser.`, "info");
-					await connectServer(c, true);
+					await connectServer(c, true, false, true);
 					return;
 				}
 				case "logout": {

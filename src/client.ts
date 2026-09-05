@@ -1,12 +1,12 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { auth, UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import type { Transport } from "@modelcontextprotocol/sdk/shared/transport.js";
 import { type CallToolResult, ToolListChangedNotificationSchema, type Tool } from "@modelcontextprotocol/sdk/types.js";
 import { type HttpServerConfig, isHttpServer, type OAuthConfig, type ServerConfig } from "./config.ts";
-import { PiOAuthProvider } from "./oauth.ts";
+import { clearStoredAuth, PiOAuthProvider } from "./oauth.ts";
 import { errorMessage, expandEnv, expandEnvRecord, globMatch, withTimeout } from "./util.ts";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected" | "auth-required" | "error";
@@ -132,17 +132,39 @@ export class McpConnection {
 		return this.connecting;
 	}
 
-	private async doConnect(interactiveAuth: boolean): Promise<void> {
+	/** Explicit login must authorize even when the server accepts anonymous requests. */
+	login(): Promise<void> {
+		if (!this.usesOAuth) return Promise.reject(new Error("OAuth is not configured"));
+		if (this.connecting) return Promise.reject(new Error("Connection in progress; retry login"));
+		this.connecting = this.doConnect(true, true).finally(() => {
+			this.connecting = undefined;
+		});
+		return this.connecting;
+	}
+
+	private async doConnect(interactiveAuth: boolean, forceLogin = false): Promise<void> {
 		await this.close();
 		this.setStatus("connecting");
 		const connectTimeout = this.config.connectTimeout ?? 30_000;
 
+		if (forceLogin) clearStoredAuth(this.oauthKey);
 		if (this.usesOAuth) {
 			this.oauthProvider = new PiOAuthProvider(this.oauthKey, this.oauthConfig());
 			this.oauthProvider.onAuthorizationUrl = ({ url }) => this.events.onAuthorizationUrl?.(this, url);
 		}
 
 		try {
+			if (forceLogin) {
+				const provider = this.oauthProvider!;
+				await provider.startCallbackServer();
+				const serverUrl = new URL(expandEnv((this.config as HttpServerConfig).url));
+				const result = await auth(provider, { serverUrl });
+				if (result === "REDIRECT") {
+					const authorizationCode = await provider.waitForAuthorizationCode();
+					const completed = await auth(provider, { serverUrl, authorizationCode });
+					if (completed !== "AUTHORIZED") throw new Error("OAuth authorization did not complete");
+				}
+			}
 			await withTimeout(this.attemptConnect(), connectTimeout, `Connecting to MCP server "${this.name}"`);
 		} catch (err) {
 			if (err instanceof UnauthorizedError && this.oauthProvider) {
@@ -167,6 +189,8 @@ export class McpConnection {
 				this.setStatus("error", `${errorMessage(err)}${detail}`);
 				throw err;
 			}
+		} finally {
+			this.oauthProvider?.stopCallbackServer();
 		}
 
 		await this.refreshTools();
