@@ -10,12 +10,7 @@ process.env.PI_CODING_AGENT_DIR = join(tmpdir(), `pi-mcp-callback-test-${process
 const jiti = createJiti(import.meta.url, { alias: {
   '@earendil-works/pi-coding-agent': fileURLToPath(new URL('./pi-stub.mjs', import.meta.url)),
 } });
-const { PiOAuthProvider, DEFAULT_CALLBACK_PORT } = await jiti.import(new URL('../src/oauth.ts', import.meta.url).href);
-
-const listen = (server, port) => new Promise((resolve, reject) => {
-  server.once('error', reject);
-  server.listen(port, '127.0.0.1', resolve);
-});
+const { PiOAuthProvider, DEFAULT_CALLBACK_PORT, listen } = await jiti.import(new URL('../src/oauth.ts', import.meta.url).href);
 
 // Occupy the default port to simulate another pi instance.
 const blocker = createServer();

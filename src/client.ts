@@ -1,5 +1,5 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { auth, UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
+import { UnauthorizedError } from "@modelcontextprotocol/sdk/client/auth.js";
 import { SSEClientTransport } from "@modelcontextprotocol/sdk/client/sse.js";
 import { getDefaultEnvironment, StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
@@ -130,7 +130,10 @@ export class McpConnection {
 		return this.connecting;
 	}
 
-	/** Explicit login must authorize even when the server accepts anonymous requests. */
+	/**
+	 * Explicit login must authorize even when the server accepts anonymous requests.
+	 * Rejects while a connection attempt is in flight; connect() would share it instead.
+	 */
 	login(): Promise<void> {
 		if (!this.usesOAuth) return Promise.reject(new Error("OAuth is not configured"));
 		if (this.connecting) return Promise.reject(new Error("Connection in progress; retry login"));
@@ -152,17 +155,7 @@ export class McpConnection {
 		}
 
 		try {
-			if (forceLogin) {
-				const provider = this.oauthProvider!;
-				await provider.startCallbackServer();
-				const serverUrl = new URL(expandEnv((this.config as HttpServerConfig).url));
-				const result = await auth(provider, { serverUrl });
-				if (result === "REDIRECT") {
-					const authorizationCode = await provider.waitForAuthorizationCode();
-					const completed = await auth(provider, { serverUrl, authorizationCode });
-					if (completed !== "AUTHORIZED") throw new Error("OAuth authorization did not complete");
-				}
-			}
+			if (forceLogin) await this.oauthProvider!.authorize(this.serverUrl());
 			await withTimeout(this.attemptConnect(), connectTimeout, `Connecting to MCP server "${this.name}"`);
 		} catch (err) {
 			if (err instanceof UnauthorizedError && this.oauthProvider) {
@@ -172,14 +165,12 @@ export class McpConnection {
 					return;
 				}
 				try {
-					await this.completeOAuth();
+					await this.oauthProvider.authorize(this.serverUrl());
 					await withTimeout(this.attemptConnect(), connectTimeout, `Connecting to MCP server "${this.name}"`);
 				} catch (authErr) {
 					await this.teardown();
 					this.setStatus("error", `OAuth failed: ${errorMessage(authErr)}`);
 					throw authErr;
-				} finally {
-					this.oauthProvider?.stopCallbackServer();
 				}
 			} else {
 				await this.teardown();
@@ -193,6 +184,10 @@ export class McpConnection {
 
 		await this.refreshTools();
 		this.setStatus("connected");
+	}
+
+	private serverUrl(): URL {
+		return new URL(expandEnv((this.config as HttpServerConfig).url));
 	}
 
 	private async attemptConnect(): Promise<void> {
@@ -228,22 +223,6 @@ export class McpConnection {
 				this.events.onLog?.(this, `failed to refresh tools: ${errorMessage(err)}`);
 			}
 		});
-	}
-
-	private async completeOAuth(): Promise<void> {
-		const provider = this.oauthProvider;
-		if (!provider) throw new Error("No OAuth provider");
-		await provider.startCallbackServer();
-		const code = await provider.waitForAuthorizationCode();
-		const cfg = this.config as HttpServerConfig;
-		const url = new URL(expandEnv(cfg.url));
-		// finishAuth exchanges the code for tokens via the provider; the transport itself is discarded.
-		const transport =
-			cfg.type === "sse"
-				? new SSEClientTransport(url, { authProvider: provider })
-				: new StreamableHTTPClientTransport(url, { authProvider: provider });
-		await transport.finishAuth(code);
-		await transport.close().catch(() => {});
 	}
 
 	async refreshTools(): Promise<Tool[]> {

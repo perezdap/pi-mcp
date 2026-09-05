@@ -7,6 +7,20 @@ export class PiOAuthProvider {
   async startCallbackServer() { if (!this.started) { this.started = true; state.listeners++; } }
   stopCallbackServer() { if (this.started) { this.started = false; state.listeners--; } }
   async waitForAuthorizationCode() { return 'test-code'; }
+  // Mirrors PiOAuthProvider.authorize: drive the SDK auth() flow, always release the listener.
+  async authorize(serverUrl) {
+    await this.startCallbackServer();
+    try {
+      const result = await auth(this, { serverUrl });
+      if (result === 'REDIRECT') {
+        const authorizationCode = await this.waitForAuthorizationCode();
+        const completed = await auth(this, { serverUrl, authorizationCode });
+        if (completed !== 'AUTHORIZED') throw new Error('OAuth authorization did not complete');
+      }
+    } finally {
+      this.stopCallbackServer();
+    }
+  }
 }
 export class UnauthorizedError extends Error {}
 export async function auth(provider, options) {

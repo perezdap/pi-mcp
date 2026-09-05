@@ -1,7 +1,7 @@
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { dirname } from "node:path";
-import type { OAuthClientProvider, OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
+import { auth, type OAuthClientProvider, type OAuthDiscoveryState } from "@modelcontextprotocol/sdk/client/auth.js";
 import type { OAuthClientInformationMixed, OAuthClientMetadata, OAuthTokens } from "@modelcontextprotocol/sdk/shared/auth.js";
 import type { OAuthConfig } from "./config.ts";
 import { tokenStorePath } from "./config.ts";
@@ -213,6 +213,25 @@ export class PiOAuthProvider implements OAuthClientProvider {
 		this.server = server;
 	}
 
+	/**
+	 * Run the full interactive authorization flow for a server URL: start the loopback
+	 * listener, drive redirect → code → token exchange via the SDK, and always release
+	 * the listener when done, success or failure.
+	 */
+	async authorize(serverUrl: URL): Promise<void> {
+		await this.startCallbackServer();
+		try {
+			const result = await auth(this, { serverUrl });
+			if (result === "REDIRECT") {
+				const authorizationCode = await this.waitForAuthorizationCode();
+				const completed = await auth(this, { serverUrl, authorizationCode });
+				if (completed !== "AUTHORIZED") throw new Error("OAuth authorization did not complete");
+			}
+		} finally {
+			this.stopCallbackServer();
+		}
+	}
+
 	redirectToAuthorization(authorizationUrl: URL): void {
 		const url = authorizationUrl.toString();
 		this.onAuthorizationUrl?.({ url });
@@ -242,7 +261,8 @@ export class PiOAuthProvider implements OAuthClientProvider {
 	}
 }
 
-function listen(server: Server, port: number): Promise<void> {
+/** Listen on 127.0.0.1 with proper error routing; exported for tests (port fallback cases). */
+export function listen(server: Server, port: number): Promise<void> {
 	return new Promise<void>((resolve, reject) => {
 		const onError = (err: Error) => {
 			server.off("error", onError);
